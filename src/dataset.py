@@ -95,9 +95,14 @@ def parse_segments(path: Path) -> tuple[np.ndarray, list[str]]:
                 continue
             times.append(time)
             labels.append(parts[1].strip().lower())
+        # Sort the times and labels based on the time values to ensure they are in chronological order.
         order = np.argsort(times)
         times = np.asarray(times, dtype=np.float64)[order]
         labels = [labels[i] for i in order]
-        
+
+    # Filter out segments at time 0 and "end" labels, keeping times and labels paired.
+    keep = [i for i, (t, lab) in enumerate(zip(times, labels)) if t != 0 and lab != "end"]
+    times = times[keep]
+    labels = [labels[i] for i in keep]
 
     return np.array(times), labels
