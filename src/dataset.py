@@ -13,6 +13,7 @@ It requires:
 
 from dataclasses import dataclass
 import json
+import numpy as np
 from pathlib import Path
 
 @dataclass
@@ -68,3 +69,35 @@ def load_spec_config(melspec_dir: Path, override: SpecConfig | None = None) -> S
     print(f"[INFO] Native FPS: {config.native_fps}")
     
     return config
+
+def parse_segments(path: Path) -> tuple[np.ndarray, list[str]]:
+    """
+    Parse the segments from a given path.
+
+    Args:
+        path (Path): Path to the segments file.
+    
+    Returns:
+        tuple[np.ndarray, list[str]]: A tuple containing the segments as a numpy array representing time and the corresponding labels as a list of strings.
+    """
+    times, labels = [], []
+    # Read the segments file and parse the time and label information.
+    with open(path, "r") as f:
+        for line in f:
+            parts = line.split()
+            # Skip lines that do not have at least two parts (time and label).
+            if len(parts) < 2:
+                continue
+            try:
+                time = float(parts[0])
+            except ValueError:
+                print(f"[WARNING] Could not convert {parts[0]} to float in file {path}. Skipping line.")
+                continue
+            times.append(time)
+            labels.append(parts[1].strip().lower())
+        order = np.argsort(times)
+        times = np.asarray(times, dtype=np.float64)[order]
+        labels = [labels[i] for i in order]
+        
+
+    return np.array(times), labels
