@@ -12,7 +12,8 @@ It requires:
 """
 
 from dataclasses import dataclass
-
+import json
+from pathlib import Path
 
 @dataclass
 class SpecConfig:
@@ -26,3 +27,44 @@ class SpecConfig:
     @property
     def native_fps(self) -> float:
         return self.sr / self.hop_length
+
+
+def load_spec_config(melspec_dir: Path, override: SpecConfig | None = None) -> SpecConfig:
+    """
+    Load the spectrogram configuration from the melspec directory.
+
+    Args:
+        melspec_dir (Path): Path to the directory containing the melspecs.
+        override (SpecConfig | None): Optional override for the default configuration.
+
+    Returns:
+        SpecConfig: The loaded spectrogram configuration.
+    """
+
+    if override is not None:
+        return override
+
+    config = SpecConfig()
+    info_paths = list(melspec_dir.glob("info.json"))
+
+    # If no info.json is found, return the default SpecConfig and print a warning.
+    if not info_paths:
+        print(f"[WARNING] No info.json found in {melspec_dir}. Using default SpecConfig.")
+        return config
+
+    # Load the info.json file and update the SpecConfig accordingly.
+    info = json.loads(info_paths[0].read_text())
+
+    # Update the SpecConfig with values from info.json if they exist.
+    if "SR" in info:
+        config.sr = info["SR"]
+    if "HOP_LENGTH" in info:
+        config.hop_length = info["HOP_LENGTH"]
+    if "N_MELS" in info:
+        config.n_mels = info["N_MELS"]
+
+    # Print the loaded configuration for debugging purposes.
+    print(f"[INFO] Loaded SpecConfig from {info_paths[0]}: {config}")
+    print(f"[INFO] Native FPS: {config.native_fps}")
+    
+    return config
