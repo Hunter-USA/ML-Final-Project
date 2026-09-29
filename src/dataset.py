@@ -14,6 +14,7 @@ It requires:
 from dataclasses import dataclass
 import json
 import numpy as np
+import pandas as pd
 from pathlib import Path
 
 @dataclass
@@ -21,9 +22,9 @@ class SpecConfig:
     """
     Configuration for spectrogram
     """
-    sr: int = 22050
-    hop_length: int = 1024
-    n_mels: int = 80
+    sr: int = 22050 # Sampling rate
+    hop_length: int = 1024 # hop length for the spectrogram
+    n_mels: int = 80 # number of mel bands
 
     @property
     def native_fps(self) -> float:
@@ -118,3 +119,60 @@ def parse_segments(path: Path) -> tuple[np.ndarray, list[str]]:
     labels = [labels[i] for i in keep]
 
     return np.array(times), labels
+
+def build_index(dataset_dir: Path, melspec_dir: Path) -> list[Track]:
+    """
+    Build an index of tracks from the dataset directory and the melspec directory.
+    
+    Args:
+        dataset_dir (Path): Path to the dataset directory containing segments and metadata.
+        melspec_dir (Path): Path to the directory containing the mel spectrograms.
+    
+    Returns:
+        list[Track]: A list of Track objects representing the tracks in the dataset.
+    """
+    meta = pd.read_csv(dataset_dir / "metadata.csv")
+    meta.columns = [c.strip() for c in meta.columns]
+    meta = meta.set_index("File")
+
+    specs: dict[str, Path] = {}
+    for p in melspec_dir.glob("*.npy"):
+        specs.setdefault(p.stem, p)
+    if not specs:
+        raise ValueError(f"No mel spectrograms found in {melspec_dir}")
+
+    # Build a mapping from track stems to their corresponding mel spectrogram paths.
+    prefix_map: dict[str, Path] = {}
+    for stem, p in specs.items():
+        prefix_map.setdefault(stem.split("-mel")[0], p)
+
+    # Build the list of tracks, keeping track of missing spectrograms and metadata.
+    tracks, missing_spec, missing_meta = [], 0, 0
+    for seg_path in sorted((dataset_dir / "segments").glob("*.txt")):
+        name = seg_path.stem
+        spec_path = specs.get(name) or prefix_map.get(name)
+        if spec_path is None:
+            missing_spec += 1
+            print(f"[WARNING] Missing mel spectrogram for {name}. Skipping track.")
+            continue
+        if name not in meta.index:
+            missing_meta += 1
+            print(f"[WARNING] Missing metadata for {name}. Skipping track.")
+            continue
+        row = meta.loc[name]
+        times, labels = parse_segments(seg_path)
+        if len(times) < 2:
+            print(f"[WARNING] Not enough segments for {name}. Skipping track.")
+            continue
+        tracks.append(
+            Track(
+                name=name,
+                artist=str(row.get("Artist", "Unknown").strip().lower()),
+                spec_path=spec_path,
+                boundaries=times,
+                labels=labels,
+                duration=float(row.get("Duration", times[-1]))
+            )
+        )
+    print(f"[INFO] Build index completed. {len(tracks)} tracks built. Missing spectrograms: {missing_spec}, Missing metadata: {missing_meta}")
+    return tracks
