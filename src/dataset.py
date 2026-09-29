@@ -29,6 +29,18 @@ class SpecConfig:
     def native_fps(self) -> float:
         return self.sr / self.hop_length
 
+@dataclass
+class Track:
+    """
+    Represents a track in the dataset.
+    """
+    name: str
+    artist: str
+    spec_path: Path
+    boundaries: np.ndarray
+    labels: list[str]
+    duration: float
+
 
 def load_spec_config(melspec_dir: Path, override: SpecConfig | None = None) -> SpecConfig:
     """
