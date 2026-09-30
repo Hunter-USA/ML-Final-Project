@@ -180,7 +180,7 @@ def build_index(dataset_dir: Path, melspec_dir: Path) -> list[Track]:
     return tracks
 
 
-def gaussian_tagets(
+def gaussian_targets(
         boundaries: np.ndarray,
         n_frames: int,
         fps: float,
@@ -236,7 +236,7 @@ def load_spec(path: Path, config: SpecConfig, pool: int) -> np.ndarray:
     # Normalize the spectrogram to have zero mean and unit variance.
     spec -= spec.mean()
     spec /= spec.std() + 1e-9
-    
+
     return spec
 
 class PatchDataset(Dataset):
@@ -247,6 +247,7 @@ class PatchDataset(Dataset):
             self,
             tracks: list[Track],
             config: SpecConfig,
+            pool: int,
             context_sec: float = 16.0,
             sigma_sec: float = 1.0,
             negative_per_positive: int = 3,
@@ -260,4 +261,18 @@ class PatchDataset(Dataset):
         self.positive_threshold = positive_threshold
         self.rng = np.random.default_rng(seed)
 
-        # implement track gaussian targets
+        # Load the mel spectrograms, targets, labels, and names for each track.
+        self.specs, self.targets, self.labels, self.names = [], [], [], []
+        for track in tracks:
+            # Load the mel spectrogram for the track and pad it to account for context.
+            spec = load_spec(track.spec_path, config, pool)
+            self.specs.append(np.pad(spec, ((0, 0), (self.half_width, self.half_width)), mode="edge"))
+            
+            y = gaussian_targets(track.boundaries, spec.shape[1], self.fps, sigma_sec)
+            self.targets.append(y)
+
+            self.names.append(track.name)
+
+            self.labels.append(track.labels)
+
+        self.n_mels = self.specs[0].shape[0]
