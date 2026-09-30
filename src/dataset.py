@@ -205,7 +205,7 @@ def gaussian_targets(
         # basically dimished returns for points further away from the boundary 
         # so if it misses by like 1 millisecond it doesn't matter, 
         # but if it misses by 1 second it matters a lot.
-        y = max(y, np.exp(-((t - b) ** 2) / (2.0 * sigma_sec**2))) 
+        y = np.maximum(y, np.exp(-((t - b) ** 2) / (2.0 * sigma_sec**2)).astype(np.float32))
     return y
 
 def load_spec(path: Path, config: SpecConfig, pool: int) -> np.ndarray:
@@ -267,7 +267,8 @@ class PatchDataset(Dataset):
             positive_threshold (float): Threshold for considering a sample as positive.
             seed (int): Random seed for reproducibility.
         """
-        self.fps = config.native_fps
+        # Pooling in load_spec reduces the frame rate, so the targets and context must use the pooled rate.
+        self.fps = config.native_fps / max(1, pool)
         self.width = int(round(context_sec * self.fps)) | 1
         self.half_width = self.width // 2
         self.negative_per_positive = negative_per_positive
@@ -311,8 +312,8 @@ class PatchDataset(Dataset):
             # Combine positive and negative indices for the current track and append them to the index list.
             for f in np.concatenate([positive, negative]):
                 idx.append((i, int(f))) # (Track index, Frame index)
-            self.index = idx
-            self.rng.shuffle(self.index)
+        self.index = idx
+        self.rng.shuffle(self.index)
 
     def __len__(self) -> int:
         """
