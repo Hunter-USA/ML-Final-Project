@@ -254,6 +254,19 @@ class PatchDataset(Dataset):
             positive_threshold: float = 0.5,
             seed: int = 42
     ):
+        """
+        Initialize the PatchDataset.
+        
+        Args:
+            tracks (list[Track]): List of Track objects representing the dataset.
+            config (SpecConfig): Configuration for the spectrogram.
+            pool (int): Pooling factor to reduce the time dimension.
+            context_sec (float): Context window size in seconds.
+            sigma_sec (float): Standard deviation of the Gaussian in seconds.
+            negative_per_positive (int): Ratio of negative to positive samples.
+            positive_threshold (float): Threshold for considering a sample as positive.
+            seed (int): Random seed for reproducibility.
+        """
         self.fps = config.native_fps
         self.width = int(round(context_sec * self.fps)) | 1
         self.half_width = self.width // 2
@@ -267,12 +280,36 @@ class PatchDataset(Dataset):
             # Load the mel spectrogram for the track and pad it to account for context.
             spec = load_spec(track.spec_path, config, pool)
             self.specs.append(np.pad(spec, ((0, 0), (self.half_width, self.half_width)), mode="edge"))
-            
+
+            # Generate Gaussian targets for the track's boundaries and append them to the targets list.
             y = gaussian_targets(track.boundaries, spec.shape[1], self.fps, sigma_sec)
             self.targets.append(y)
 
+            # Append the track's name and labels to the respective lists.
             self.names.append(track.name)
-
             self.labels.append(track.labels)
 
         self.n_mels = self.specs[0].shape[0]
+        self.resample()
+    
+    
+    def resample(self) -> None:
+        """
+        Resample the dataset balancing positive and negative samples based on the specified thresholds.
+        """
+        idx = []
+        # Iterate over each track's targets to identify positive and negative samples.
+        for i, y in enumerate(self.targets):
+            positive = np.where(y > self.positive_threshold)[0]
+            n_negative = min(len(y), self.negative_per_positive * max(1, len(positive)))
+            negative_pool = np.flatnonzero(y < 0.05)
+            negative = (
+                self.rng.choice(negative_pool, size=min(n_negative, len(negative_pool)), replace=False)
+                if len(negative_pool) > 0 
+                else np.array([], dtype=int)
+            )
+            # Combine positive and negative indices for the current track and append them to the index list.
+            for f in np.concatenate([positive, negative]):
+                idx.append((i, int(f)))
+            self.index = idx
+            self.rng.shuffle(self.index)
