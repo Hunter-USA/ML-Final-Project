@@ -310,6 +310,32 @@ class PatchDataset(Dataset):
             )
             # Combine positive and negative indices for the current track and append them to the index list.
             for f in np.concatenate([positive, negative]):
-                idx.append((i, int(f)))
+                idx.append((i, int(f))) # (Track index, Frame index)
             self.index = idx
             self.rng.shuffle(self.index)
+
+    def __len__(self) -> int:
+        """
+        Return the total number of samples in the dataset.
+        
+        Returns:
+            int: Total number of samples.
+        """
+        return len(self.index)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get a sample from the dataset at the specified index.
+        
+        Args:
+            idx (int): Index of the sample to retrieve.
+        
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: A tuple containing the mel spectrogram patch and the corresponding target value.
+        """
+        track_idx, frame_idx = self.index[idx]
+        patch = self.specs[track_idx][:, frame_idx:frame_idx + self.width] # (n_mels, width)
+        return (
+            torch.from_numpy(np.ascontiguousarray(patch)).unsqueeze(0),  # Add channel dimension
+            torch.tensor(self.targets[track_idx][frame_idx], dtype=torch.float32)
+        )
