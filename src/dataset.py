@@ -16,6 +16,8 @@ import json
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import torch
+from torch.utils.data import Dataset
 
 @dataclass
 class SpecConfig:
@@ -176,3 +178,56 @@ def build_index(dataset_dir: Path, melspec_dir: Path) -> list[Track]:
         )
     print(f"[INFO] Build index completed. {len(tracks)} tracks built. Missing spectrograms: {missing_spec}, Missing metadata: {missing_meta}")
     return tracks
+
+
+def gaussian_tagets(
+        boundaries: np.ndarray,
+        n_frames: int,
+        fps: float,
+        sigma_sec: float
+) -> np.ndarray:
+    """
+    Generate Gaussian targets for the given boundaries.
+    
+    Args:
+        boundaries (np.ndarray): Array of boundary times.
+        n_frames (int): Number of frames in the spectrogram.
+        fps (float): Frames per second of the spectrogram.
+        sigma_sec (float): Standard deviation of the Gaussian in seconds.
+        
+    Returns:
+        np.ndarray: The generated Gaussian targets.
+    """
+    t = np.arange(n_frames) / fps
+    y = np.zeros(n_frames, dtype=np.float32)
+    for b in boundaries:
+        # exp(-t² / 2σ²) 
+        # basically dimished returns for points further away from the boundary 
+        # so if it misses by like 1 millisecond it doesn't matter, 
+        # but if it misses by 1 second it matters a lot.
+        y = max(y, np.exp(-((t - b) ** 2) / (2.0 * sigma_sec**2))) 
+    return y
+
+class PatchDataset(Dataset):
+    """
+    A PyTorch Dataset for making patches from the mel spectrograms
+    """
+    def __init__(
+            self,
+            tracks: list[Track],
+            config: SpecConfig,
+            context_sec: float = 16.0,
+            sigma_sec: float = 1.0,
+            negative_per_positive: int = 3,
+            positive_threshold: float = 0.5,
+            seed: int = 42
+    ):
+        self.fps = config.native_fps
+        self.width = int(round(context_sec * self.fps)) | 1
+        self.half_width = self.width // 2
+        self.negative_per_positive = negative_per_positive
+        self.positive_threshold = positive_threshold
+        self.rng = np.random.default_rng(seed)
+
+        # implement track gaussian targets
+        
