@@ -141,7 +141,7 @@ def build_index(dataset_dir: Path, melspec_dir: Path) -> list[Track]:
     for p in melspec_dir.glob("*.npy"):
         specs.setdefault(p.stem, p)
     if not specs:
-        raise ValueError(f"No mel spectrograms found in {melspec_dir}")
+        raise ValueError(f"[ERROR] No mel spectrograms found in {melspec_dir}")
 
     # Build a mapping from track stems to their corresponding mel spectrogram paths.
     prefix_map: dict[str, Path] = {}
@@ -208,6 +208,37 @@ def gaussian_tagets(
         y = max(y, np.exp(-((t - b) ** 2) / (2.0 * sigma_sec**2))) 
     return y
 
+def load_spec(path: Path, config: SpecConfig, pool: int) -> np.ndarray:
+    """
+    Load a melspec and make it (n_mels, time)
+    
+    Args:
+        path (Path): Path to the mel spectrogram file.
+        config (SpecConfig): Configuration for the spectrogram.
+        pool (int): Pooling factor to reduce the time dimension.
+        
+    Returns:
+        np.ndarray: The loaded and pooled mel spectrogram.
+    """
+
+    spec = np.load(path).astype(np.float32)
+    if spec.ndim != 2 or spec.shape[0] != config.n_mels:
+        raise ValueError(f"[ERROR] Invalid mel spectrogram shape {spec.shape} for {path}. Expected shape: ({config.n_mels}, time).")
+    # Normalize the spectrogram if all values are non-negative.
+    if spec.min() >= 0.0:
+        spec = np.log1p(spec)
+
+    # Pool the spectrogram along the time dimension if the pooling factor is greater than 1.
+    if pool > 1:
+        t = (spec.shape[1] // pool) * pool
+        spec = spec[:, :t].reshape(spec.shape[0], t // pool, pool).mean(axis=2)
+    
+    # Normalize the spectrogram to have zero mean and unit variance.
+    spec -= spec.mean()
+    spec /= spec.std() + 1e-9
+    
+    return spec
+
 class PatchDataset(Dataset):
     """
     A PyTorch Dataset for making patches from the mel spectrograms
@@ -230,4 +261,3 @@ class PatchDataset(Dataset):
         self.rng = np.random.default_rng(seed)
 
         # implement track gaussian targets
-        
