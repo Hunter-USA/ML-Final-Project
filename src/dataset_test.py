@@ -10,14 +10,22 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
+from torch.utils.data import DataLoader
 
 from src.dataset import (
+    PatchDataset,
     SpecConfig,
     Track,
     build_index,
+    gaussian_targets,
+    load_spec,
     load_spec_config,
     parse_segments,
 )
+
+# Small config so frame math is easy to check by hand: native fps = 100 / 10 = 10.
+SMALL = SpecConfig(sr=100, hop_length=10, n_mels=8)
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +49,29 @@ def write_spec(melspec_dir: Path, stem: str) -> Path:
     p = melspec_dir / f"{stem}.npy"
     np.save(p, np.zeros((80, 10), dtype=np.float32))
     return p
+
+
+def make_track(
+        directory: Path,
+        name: str,
+        spec: np.ndarray,
+        boundaries: list[float],
+        labels: list[str] | None = None,
+) -> Track:
+    spec_path = directory / f"{name}.npy"
+    np.save(spec_path, spec)
+    return Track(
+        name=name,
+        artist="x",
+        spec_path=spec_path,
+        boundaries=np.asarray(boundaries, dtype=np.float64),
+        labels=labels or [f"seg{i}" for i in range(len(boundaries))],
+        duration=spec.shape[1] / SMALL.native_fps,
+    )
+
+
+def normalize(x: np.ndarray) -> np.ndarray:
+    return (x - x.mean()) / (x.std() + 1e-9)
 
 
 @pytest.fixture
@@ -384,3 +415,236 @@ class TestBuildIndex:
         build_index(dataset_dir, melspec_dir)
 
         assert "1 tracks built" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# gaussian_targets
+# ---------------------------------------------------------------------------
+
+class TestGaussianTargets:
+    def test_shape_and_dtype(self):
+        y = gaussian_targets(np.array([2.0]), n_frames=50, fps=10.0, sigma_sec=0.5)
+        assert y.shape == (50,)
+        assert y.dtype == np.float32
+
+    def test_no_boundaries_all_zero(self):
+        y = gaussian_targets(np.array([]), n_frames=50, fps=10.0, sigma_sec=0.5)
+        np.testing.assert_array_equal(y, np.zeros(50, dtype=np.float32))
+
+    def test_peak_is_one_on_boundary_frame(self):
+        y = gaussian_targets(np.array([2.0]), n_frames=50, fps=10.0, sigma_sec=0.5)
+        assert y[20] == pytest.approx(1.0)
+        assert int(np.argmax(y)) == 20
+
+    def test_one_sigma_away(self):
+        # sigma = 0.5 s at 10 fps is 5 frames.
+        y = gaussian_targets(np.array([2.0]), n_frames=50, fps=10.0, sigma_sec=0.5)
+        assert y[25] == pytest.approx(np.exp(-0.5), rel=1e-5)
+        assert y[15] == pytest.approx(np.exp(-0.5), rel=1e-5)
+
+    def test_symmetric_around_boundary(self):
+        y = gaussian_targets(np.array([2.0]), n_frames=50, fps=10.0, sigma_sec=0.5)
+        np.testing.assert_allclose(y[20 - 10:20], y[20 + 10:20:-1], rtol=1e-6)
+
+    def test_overlapping_boundaries_take_max_not_sum(self):
+        y = gaussian_targets(np.array([2.0, 2.2]), n_frames=50, fps=10.0, sigma_sec=0.5)
+        assert y.max() <= 1.0 + 1e-6
+        assert y[20] == pytest.approx(1.0)
+        assert y[22] == pytest.approx(1.0)
+
+    def test_boundary_past_end_is_near_zero(self):
+        y = gaussian_targets(np.array([100.0]), n_frames=50, fps=10.0, sigma_sec=0.5)
+        assert y.max() < 1e-6
+
+    def test_values_in_unit_range(self):
+        y = gaussian_targets(np.array([0.7, 1.3, 3.9]), n_frames=50, fps=10.0, sigma_sec=1.0)
+        assert y.min() >= 0.0
+        assert y.max() <= 1.0 + 1e-6
+
+
+# ---------------------------------------------------------------------------
+# load_spec
+# ---------------------------------------------------------------------------
+
+class TestLoadSpec:
+    @pytest.mark.parametrize("shape", [(80,), (1, 80, 10), (40, 10)])
+    def test_invalid_shape_raises(self, tmp_path, shape):
+        p = tmp_path / "s.npy"
+        np.save(p, np.zeros(shape, dtype=np.float32))
+        with pytest.raises(ValueError, match="Invalid mel spectrogram shape"):
+            load_spec(p, SpecConfig(), pool=1)
+
+    def test_output_float32_and_normalized(self, tmp_path):
+        p = tmp_path / "s.npy"
+        np.save(p, np.random.default_rng(0).random((8, 40)))  # float64 on disk
+        spec = load_spec(p, SMALL, pool=1)
+        assert spec.dtype == np.float32
+        assert spec.mean() == pytest.approx(0.0, abs=1e-5)
+        assert spec.std() == pytest.approx(1.0, abs=1e-4)
+
+    def test_non_negative_input_gets_log1p(self, tmp_path):
+        raw = np.random.default_rng(0).random((8, 40)).astype(np.float32) * 10
+        p = tmp_path / "s.npy"
+        np.save(p, raw)
+        np.testing.assert_allclose(
+            load_spec(p, SMALL, pool=1), normalize(np.log1p(raw)), rtol=1e-4, atol=1e-5
+        )
+
+    def test_negative_input_skips_log1p(self, tmp_path):
+        raw = np.random.default_rng(0).normal(size=(8, 40)).astype(np.float32)
+        assert raw.min() < 0
+        p = tmp_path / "s.npy"
+        np.save(p, raw)
+        np.testing.assert_allclose(load_spec(p, SMALL, pool=1), normalize(raw), rtol=1e-4, atol=1e-5)
+
+    @pytest.mark.parametrize("pool", [0, 1])
+    def test_pool_of_one_or_less_keeps_frames(self, tmp_path, pool):
+        p = tmp_path / "s.npy"
+        np.save(p, np.random.default_rng(0).random((8, 10)).astype(np.float32))
+        assert load_spec(p, SMALL, pool=pool).shape == (8, 10)
+
+    def test_pooling_drops_remainder_and_averages(self, tmp_path):
+        raw = np.random.default_rng(0).random((8, 10)).astype(np.float32)
+        p = tmp_path / "s.npy"
+        np.save(p, raw)
+        spec = load_spec(p, SMALL, pool=3)
+        assert spec.shape == (8, 3)
+        expected = np.log1p(raw)[:, :9].reshape(8, 3, 3).mean(axis=2)
+        np.testing.assert_allclose(spec, normalize(expected), rtol=1e-4, atol=1e-5)
+
+    def test_constant_spec_has_no_nan(self, tmp_path):
+        p = tmp_path / "s.npy"
+        np.save(p, np.ones((8, 10), dtype=np.float32))
+        spec = load_spec(p, SMALL, pool=1)
+        assert np.isfinite(spec).all()
+
+
+# ---------------------------------------------------------------------------
+# PatchDataset
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def tracks(tmp_path: Path) -> list[Track]:
+    rng = np.random.default_rng(0)
+    return [
+        make_track(tmp_path, "a", rng.random((8, 100)).astype(np.float32), [3.0, 6.0]),
+        make_track(tmp_path, "b", rng.random((8, 100)).astype(np.float32), [2.0, 5.0, 8.0]),
+    ]
+
+
+def make_dataset(tracks: list[Track], pool: int = 1, seed: int = 42) -> PatchDataset:
+    return PatchDataset(tracks, SMALL, pool=pool, context_sec=1.0, sigma_sec=0.2, seed=seed)
+
+
+class TestPatchDataset:
+    def test_window_geometry(self, tracks):
+        ds = make_dataset(tracks)
+        # 1.0 s at 10 fps = 10 frames, forced odd -> 11.
+        assert ds.width == 11
+        assert ds.width % 2 == 1
+        assert ds.half_width == ds.width // 2
+        assert ds.n_mels == SMALL.n_mels
+
+    @pytest.mark.parametrize("pool", [1, 2])
+    def test_fps_accounts_for_pooling(self, tracks, pool):
+        ds = make_dataset(tracks, pool=pool)
+        assert ds.fps == pytest.approx(SMALL.native_fps / pool)
+
+    @pytest.mark.parametrize("pool", [1, 2])
+    def test_specs_padded_and_targets_match_frames(self, tracks, pool):
+        ds = make_dataset(tracks, pool=pool)
+        for track, spec, y in zip(tracks, ds.specs, ds.targets):
+            n_frames = load_spec(track.spec_path, SMALL, pool).shape[1]
+            assert spec.shape == (SMALL.n_mels, n_frames + 2 * ds.half_width)
+            assert y.shape == (n_frames,)
+
+    def test_names_and_labels_keep_order(self, tracks):
+        ds = make_dataset(tracks)
+        assert ds.names == ["a", "b"]
+        assert ds.labels == [t.labels for t in tracks]
+
+    def test_index_contains_every_positive(self, tracks):
+        ds = make_dataset(tracks)
+        indexed = set(ds.index)
+        for i, y in enumerate(ds.targets):
+            positives = np.flatnonzero(y > ds.positive_threshold)
+            assert len(positives) > 0
+            assert {(i, int(f)) for f in positives} <= indexed
+
+    def test_negatives_are_far_from_boundaries_and_capped(self, tracks):
+        ds = make_dataset(tracks)
+        for i, y in enumerate(ds.targets):
+            n_pos = int((y > ds.positive_threshold).sum())
+            negatives = [f for (t, f) in ds.index if t == i and y[f] <= ds.positive_threshold]
+            assert all(y[f] < 0.05 for f in negatives)
+            assert 0 < len(negatives) <= ds.negative_per_positive * max(1, n_pos)
+
+    def test_no_duplicate_samples(self, tracks):
+        ds = make_dataset(tracks)
+        assert len(ds.index) == len(set(ds.index))
+
+    def test_len_matches_index(self, tracks):
+        ds = make_dataset(tracks)
+        assert len(ds) == len(ds.index) > 0
+
+    def test_getitem_shapes_and_target(self, tracks):
+        ds = make_dataset(tracks)
+        for idx in range(5):
+            patch, target = ds[idx]
+            t, f = ds.index[idx]
+            assert isinstance(patch, torch.Tensor)
+            assert patch.dtype == torch.float32
+            assert patch.shape == (1, SMALL.n_mels, ds.width)
+            assert target.dtype == torch.float32
+            assert target.shape == ()
+            assert target.item() == pytest.approx(float(ds.targets[t][f]))
+
+    def test_patch_is_centered_on_frame(self, tracks):
+        ds = make_dataset(tracks)
+        unpadded = [load_spec(t.spec_path, SMALL, 1) for t in tracks]
+        for idx in range(10):
+            patch, _ = ds[idx]
+            t, f = ds.index[idx]
+            np.testing.assert_allclose(patch[0, :, ds.half_width].numpy(), unpadded[t][:, f])
+
+    def test_edge_frames_give_full_width_patches(self, tracks):
+        ds = make_dataset(tracks)
+        last = ds.targets[0].shape[0] - 1
+        ds.index = [(0, 0), (0, last)]
+        unpadded = load_spec(tracks[0].spec_path, SMALL, 1)
+        for idx, f in enumerate([0, last]):
+            patch, _ = ds[idx]
+            assert patch.shape == (1, SMALL.n_mels, ds.width)
+            np.testing.assert_allclose(patch[0, :, ds.half_width].numpy(), unpadded[:, f])
+
+    def test_same_seed_is_reproducible(self, tracks):
+        assert make_dataset(tracks, seed=7).index == make_dataset(tracks, seed=7).index
+
+    def test_different_seed_changes_index(self, tracks):
+        assert make_dataset(tracks, seed=1).index != make_dataset(tracks, seed=2).index
+
+    def test_resample_keeps_positives_and_reshuffles(self, tracks):
+        ds = make_dataset(tracks)
+        before = list(ds.index)
+
+        def positives(index):
+            return {(t, f) for (t, f) in index if ds.targets[t][f] > ds.positive_threshold}
+
+        ds.resample()
+        assert positives(ds.index) == positives(before)
+        assert ds.index != before
+
+    def test_pooled_targets_peak_at_pooled_frame(self, tmp_path):
+        # Boundary at 2.0 s with pool=2 -> 5 fps -> peak at frame 10 (not 20).
+        track = make_track(tmp_path, "p", np.random.default_rng(0).random((8, 100)).astype(np.float32), [2.0])
+        ds = make_dataset([track], pool=2)
+        y = ds.targets[0]
+        assert y.shape == (50,)
+        assert int(np.argmax(y)) == 10
+        assert y[10] == pytest.approx(1.0)
+
+    def test_works_with_dataloader(self, tracks):
+        ds = make_dataset(tracks)
+        patches, targets = next(iter(DataLoader(ds, batch_size=4, shuffle=False)))
+        assert patches.shape == (4, 1, SMALL.n_mels, ds.width)
+        assert targets.shape == (4,)
