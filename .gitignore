@@ -11,3 +11,17 @@ venv.bak/
 __pycache__/
 *.pyc
 *.pyd
+
+# Tooling
+.pytest_cache/
+*.egg-info/
+.ipynb_checkpoints/
+.DS_Store
+
+# Data, checkpoints and generated predictions (large / reproducible)
+data/
+runs/
+predictions/
+*.tgz
+*.part
+results_standin/

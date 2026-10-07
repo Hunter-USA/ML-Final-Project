@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sharp-song-structure"
+version = "1.0.0"
+description = "Team Sharp (CS 4342): song-structure analysis on the Harmonix Set with a CNN + BiGRU"
+requires-python = ">=3.12"
+
+[tool.setuptools]
+packages = ["sharp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
